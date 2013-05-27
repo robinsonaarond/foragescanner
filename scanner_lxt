@@ -1,0 +1,3 @@
+#! /bin/bash
+
+lxterminal --geometry=33x14 -t Forage -e "/home/fs/bin/scanner.py"

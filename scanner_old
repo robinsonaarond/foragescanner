@@ -1,0 +1,161 @@
+#! /bin/bash
+clear
+
+# Declare globals
+my_spreadsheet="/home/fs/Documents/Food_Storage.csv"
+my_database="/home/fs/Documents/fs.db"
+last_updated=$(date +%d-%m-%Y)
+tmp_export="/tmp/food_storage.csv"
+incr=1
+
+echo -n "Adding or Removing? <A/r>: "
+read add_remove
+case $add_remove in
+	a|A|add|adding)
+		state="adding"
+	;;
+	r|R|remove|remving)
+		state="removing"
+	;;
+	*)
+		state="adding"
+	;;
+esac
+echo "you chose to $state."
+exit
+
+
+function beep_happy {
+	timeout .3 mplayer ~/.local/share/scanner/beep.wav &>/dev/null | set +m
+}
+function beep_error {
+	timeout .3 mplayer ~/.local/share/scanner/error.wav &>/dev/null | set +m
+}
+
+# Update Database table
+# (upc TEXT, amount INTEGER, par INTEGER, description TEXT, weight TEXT, lastupdated DATE, classification TEXT)
+function db_add {
+	if [ ! -z "$upc" ]; then
+		sqlite3 $my_database "insert into food(upc, amount, description, weight, lastupdated) values('$upc', $amount, '$description', '$weight', '$last_updated')"
+	fi
+}
+function db_edit {
+	if [ ! -z "$upc" ]; then
+		sqlite3 $my_database "update food set amount='$amount' where upc='$upc'"
+		sqlite3 $my_database "update food set lastupdated='$last_updated' where upc='$upc'"
+		[[ "$to_modify" =~ .*description.* ]] && sqlite3 $my_database "update food set description='$description' where upc='$upc'"
+		[[ "$to_modify" =~ .*weight.* ]] && sqlite3 $my_database "update food set weight='$weight' where upc='$upc'"
+	fi
+}
+
+
+# Increment value (or reduce it)
+function modifier {
+	to_modify="amount lastupdated"
+	if [ "$state" == "adding" ]; then
+		amount=$(( $amount + $incr ))
+		# Check the description field; add one if there isn't one.
+		if [ "$(sqlite3 $my_database "select description from food where upc='$upc'")" == "" ]; then
+			to_modify="$to_modify description"
+		fi
+		# Now check the weight field.
+		if [ "$(sqlite3 $my_database "select weight from food where upc='$upc'")" == "" ]; then
+			to_modify="$to_modify weight"
+		fi
+		# Do the updated field regardless.
+	elif [ "$state" == "removing" ]; then
+		amount=$(( $amount - $incr ))
+	fi
+	db_edit
+	incr=1
+}
+
+function get_description {
+	description=$(sqlite3 $my_database "select description from food where upc='$upc'")
+	#weight=$(sqlite3 $my_database "select weight from food where upc='$upc'")
+	if [ -z "$description" ]; then
+		curl --silent -o $tmppage "http://www.upcdatabase.com/item/$upc"
+		#weight="$(cat $tmppage|grep Size\/Weight|sed -e "s/<tr>//g" -e "s/<td>//g" -e "s/Size\/Weight//g" -e "s/<\/td>//g" -e "s/<\/tr>//g")"
+		description="$(cat $tmppage|grep Description| sed -e "s/<tr>//g" -e "s/<td>//g" -e "s/<\/td>//g" -e "s/<\/tr>//g" -e "s/amp\;//g" -e "s/Description//g")"
+		>$tmppage
+		
+		[ -z "$description" ] && curl --silent -o $tmppage "http://eandata.com/feed.php?keycode=D96283674FDB7BEF&mode=csv&comp=no&find=$upc"
+		[ -z "$description" ] && description="$(cat $tmppage|head -n 2|tail -n 1|awk -F, '{print $7}'|sed 's/\"//g')"
+		[ -z "$weight" ] && weight="$(cat $tmppage|head -n 2|tail -n 1|awk -F, '{print $8}'|sed 's/\"//g')"
+		# Other page
+		# curl "http://eandata.com/feed.php?keycode=D96283674FDB7BEF&mode=csv&comp=no&find=$upc"
+	fi
+	# This is just for display purposes, when scanning.  I don't want "Not Found" to actually get entered into the database...
+	if [ -z "$description" ]; then
+		temp_desc="Not Found"
+		beep_error
+		echo -n "No description found. Care to enter one yourself? [Press Enter to skip]: "
+		read description
+		[ ! -z "$description" ] && temp_desc=$description
+	else
+		temp_desc=$description
+	fi
+}
+
+# Get barcode (old zbar code)
+#tmpnum=/tmp/barcode.$$
+#touch $tmpnum
+tmppage=/tmp/barcode_page.$$
+touch $tmppage
+
+#zbarcam > $tmpnum &
+#pid="$!"
+echo "Scan Items, or type 'q' and Enter to quit. "
+while true; do
+	echo -n "> "
+	read upc
+	# Here we execute some meta commands.
+	if [[ "$upc" == "exit" || "$upc" == "quit" || "$upc" == "q" ]]; then
+		break
+	fi	
+	if [ "$upc" -lt 5000 ]; then
+		incr=$upc
+		echo "Amount changed to $incr for next scan."
+		continue
+	fi
+	get_description
+	my_line=$(sqlite3 $my_database "select * from food where upc='$upc'")
+	if [ "$(echo $my_line|wc -c)" -gt 1 ]; then
+		amount=$(sqlite3 $my_database "select amount from food where upc='$upc'")
+		[ "$amount" == "" ] && amount=0 # Blank wasn't working out too well...
+		modifier
+		beep_happy
+		echo "There are now '$amount' items for UPC '$upc' ($temp_desc)..."
+	else
+		amount=0
+		db_add
+		modifier
+		beep_happy
+		echo "There are now '$amount' items for UPC '$upc' ($temp_desc)..."
+	fi		
+	# Blank out variables
+	unset upc
+	unset full_upc
+	unset weight
+	unset description
+	unset my_line
+	incr=1
+done
+echo "Scanning complete.  Backing up..."
+cp $my_database /home/fs/Documents/.database_backups/$(date +%Y-%m-%d_%H-%M-%S)
+ping -c 1 10.10.10.102 2>/dev/null >/dev/null
+if [ "$?" == "0" ]; then
+	sqlite3 -header $my_database "select * from food" > $tmp_export
+	scp -q $tmp_export 10.10.10.102:/home/fs/Documents/
+	scp -q $my_database 10.10.10.102:/home/fs/Documents/
+else
+	echo "Computer upstairs unavailable.  Will try again next time."
+fi
+#rm -f $tmpnum
+rm -f $tmppage
+rm -f $tmp_export
+echo "All processing complete.  Thank you.  The program will now exit."
+sleep 1
+
+
+~/bin/scanner
