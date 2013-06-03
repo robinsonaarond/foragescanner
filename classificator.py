@@ -8,14 +8,13 @@ import sqlite3 as lite
 from fuzzywuzzy import fuzz
 from fuzzywuzzy import process
 
-myDB = "/Users/aaronr/Documents/fs_raspberrypi_contents/root/home/fs/Documents/fs.db"
-
-def getClass(test):
+def getClass(description,myDB):
+	myclass = None
 	try:
 		con = None
 		con = lite.connect(myDB)
 		cur = con.cursor()
-	### First get list of classifications
+	# Get list of classifications
 		sqlquery = "select class from classifications"
 		try:
 			cur.execute(sqlquery)
@@ -24,27 +23,17 @@ def getClass(test):
 			print e
 			classes = ""
 			pass
-	### Get list of DB descriptions that don't have classifications
-		#sqlquery = "select description from food where classification is null"
-		sqlquery = "select description from food"
-		try:
-			cur.execute(sqlquery)
-			descriptions = cur.fetchall()
-		except Exception, e:
-			print e
-			descriptions = ""
-			pass
 	except Exception, e:
 		print e
 		pass
-	### Guess classifications and add into database
+	### Guess classification for description and return value
 	#		- Classes should be case/syntax insensitive (e.g., "Black Beans" = "black beans" = "black_beans")
-	#for desc in descriptions:
-		#print fuzz.partial_ratio(classes[0], desc), classes[0], desc
-	desc_list = [x[0] for x in descriptions]
 	class_list = [x[0] for x in classes]
-	for myclass in class_list:
-		cls = myclass.upper()
-		print cls, process.extract(cls, desc_list, limit=1)	
-	return 0
+	try:
+		extraction = process.extractOne(description, class_list)
+		if extraction[1] >= 80:
+			myclass = extraction[0]
+	except:
+		pass
+	return myclass
 
